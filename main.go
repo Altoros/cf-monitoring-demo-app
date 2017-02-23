@@ -2,9 +2,14 @@ package main
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"net/http"
 	"os"
+	"strconv"
 
+	"unsafe"
+
+	"github.com/bradfitz/gomemcache/memcache"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 )
@@ -20,21 +25,30 @@ func main() {
 		w.Write(indexHTML)
 	})
 
+	// MySQL
 	http.HandleFunc("/mysql", func(w http.ResponseWriter, r *http.Request) {
 		if err := sqldb("mysql", os.Getenv("MYSQL_URL")); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-
 		http.Redirect(w, r, "/", http.StatusFound)
 	})
 
+	// PostgreSQL
 	http.HandleFunc("/pgsql", func(w http.ResponseWriter, r *http.Request) {
 		if err := sqldb("postgres", "postgres://"+os.Getenv("PGSQL_URL")); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		http.Redirect(w, r, "/", http.StatusFound)
+	})
 
+	// Memcached
+	http.HandleFunc("/memcache", func(w http.ResponseWriter, r *http.Request) {
+		if err := memcached(os.Getenv("MEMCACHE_ADDR")); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		http.Redirect(w, r, "/", http.StatusFound)
 	})
 
@@ -50,10 +64,6 @@ func main() {
 func sqldb(driver, source string) error {
 	db, err := sql.Open(driver, source)
 	if err != nil {
-		return err
-	}
-
-	if err = db.Ping(); err != nil {
 		return err
 	}
 
@@ -75,6 +85,31 @@ func sqldb(driver, source string) error {
 	return nil
 }
 
+func memcached(addr string) (err error) {
+	mc := memcache.New(addr)
+
+	b := make([]byte, unsafe.Sizeof(uint64(0)))
+	for i := 0; i < 10000; i++ {
+		binary.LittleEndian.PutUint64(b, uint64(i))
+
+		if err = mc.Set(&memcache.Item{
+			Key:   "cf_monitoring-" + strconv.Itoa(i),
+			Value: b,
+		}); err != nil {
+			return
+		}
+	}
+
+	// cleanup
+	for i := 0; i < 10000; i++ {
+		if err = mc.Delete("cf_monitoring-" + strconv.Itoa(i)); err != nil {
+			return
+		}
+	}
+
+	return
+}
+
 var indexHTML = []byte(`
 <!DOCTYPE html>
 <html>
@@ -94,6 +129,7 @@ var indexHTML = []byte(`
 		<div class="container" >
 			<a class="btn btn-primary" href="/mysql">MySQL</a>
 			<a class="btn btn-success" href="/pgsql">PostgreSQL</a>
+			<a class="btn btn-info" href="/memcache">Memcache</a>
 		</div>
 
 		<script src="//code.jquery.com/jquery-3.1.1.min.js" integrity="sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8=" crossorigin="anonymous"></script>
