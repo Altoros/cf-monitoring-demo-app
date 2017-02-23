@@ -10,6 +10,7 @@ import (
 	"unsafe"
 
 	"github.com/bradfitz/gomemcache/memcache"
+	"github.com/garyburd/redigo/redis"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	"gopkg.in/mgo.v2"
@@ -34,6 +35,7 @@ var indexHTML = []byte(`
 		<div class="container" >
 			<a class="btn btn-primary" href="/mysql">MySQL</a>
 			<a class="btn btn-success" href="/pgsql">PostgreSQL</a>
+			<a class="btn btn-danger" href="/redis">Redis</a>
 			<a class="btn btn-info" href="/memcache">Memcache</a>
 			<a class="btn btn-warning" href="/mongodb">MongoDB</a>
 		</div>
@@ -45,8 +47,9 @@ var indexHTML = []byte(`
 `)
 
 func main() {
-	mysqlUrl := env("MYSQL_URL")
-	pgsqlUrl := env("PGSQL_URL")
+	mysqlURL := env("MYSQL_URL")
+	pgsqlURL := env("PGSQL_URL")
+	redisURL := env("REDIS_URL")
 	memcacheAddr := env("MEMCACHE_ADDR")
 	mongodbAddr := env("MONGODB_ADDR")
 
@@ -62,7 +65,7 @@ func main() {
 
 	// MySQL
 	http.HandleFunc("/mysql", func(w http.ResponseWriter, r *http.Request) {
-		if err := sqldb("mysql", mysqlUrl); err != nil {
+		if err := testSQLDB("mysql", mysqlURL); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -71,7 +74,16 @@ func main() {
 
 	// PostgreSQL
 	http.HandleFunc("/pgsql", func(w http.ResponseWriter, r *http.Request) {
-		if err := sqldb("postgres", "postgres://"+pgsqlUrl); err != nil {
+		if err := testSQLDB("postgres", "postgres://"+pgsqlURL); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, "/", http.StatusFound)
+	})
+
+	// Redis
+	http.HandleFunc("/redis", func(w http.ResponseWriter, r *http.Request) {
+		if err := testRedis(redisURL); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -80,7 +92,7 @@ func main() {
 
 	// Memcached
 	http.HandleFunc("/memcache", func(w http.ResponseWriter, r *http.Request) {
-		if err := memcached(memcacheAddr); err != nil {
+		if err := testMemcache(memcacheAddr); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -89,7 +101,7 @@ func main() {
 
 	// MongoDB
 	http.HandleFunc("/mongodb", func(w http.ResponseWriter, r *http.Request) {
-		if err := mongodb(mongodbAddr); err != nil {
+		if err := testMongoDB(mongodbAddr); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -114,7 +126,7 @@ func env(k string) string {
 	return v
 }
 
-func sqldb(driver, source string) error {
+func testSQLDB(driver, source string) error {
 	db, err := sql.Open(driver, source)
 	if err != nil {
 		return err
@@ -125,7 +137,7 @@ func sqldb(driver, source string) error {
 		return err
 	}
 
-	for i := 0; i < 500; i++ {
+	for i := 0; i < 1000; i++ {
 		if _, err = db.Exec("INSERT INTO cf_monitoring VALUES (1)"); err != nil {
 			return err
 		}
@@ -138,7 +150,28 @@ func sqldb(driver, source string) error {
 	return nil
 }
 
-func memcached(addr string) error {
+func testRedis(url string) error {
+	conn, err := redis.DialURL("redis://" + url)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	for i := 0; i < 10000; i++ {
+		key := "cf_monitoring-"+strconv.Itoa(i)
+
+		if _, err := conn.Do("SET", key, i); err != nil {
+			return err
+		}
+		if _, err := conn.Do("DEL", key); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func testMemcache(addr string) error {
 	mc := memcache.New(addr)
 
 	b := make([]byte, unsafe.Sizeof(uint64(0)))
@@ -151,10 +184,7 @@ func memcached(addr string) error {
 		}); err != nil {
 			return err
 		}
-	}
 
-	// cleanup
-	for i := 0; i < 10000; i++ {
 		if err := mc.Delete("cf_monitoring-" + strconv.Itoa(i)); err != nil {
 			return err
 		}
@@ -163,7 +193,7 @@ func memcached(addr string) error {
 	return nil
 }
 
-func mongodb(addr string) error {
+func testMongoDB(addr string) error {
 	mg, err := mgo.Dial(addr)
 	if err != nil {
 		return err
