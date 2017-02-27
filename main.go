@@ -7,15 +7,15 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"unsafe"
-
 	"strings"
+	"unsafe"
 
 	"github.com/bradfitz/gomemcache/memcache"
 	"github.com/garyburd/redigo/redis"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gocql/gocql"
 	_ "github.com/lib/pq"
+	"github.com/streadway/amqp"
 	"gopkg.in/mgo.v2"
 )
 
@@ -42,6 +42,7 @@ var indexHTML = []byte(`
 			<a class="btn btn-info" href="/memcache">Memcache</a>
 			<a class="btn btn-warning" href="/mongodb">MongoDB</a>
 			<a class="btn btn-default" href="/cassandra">Cassandra</a>
+			<a class="btn btn-default" href="/rabbitmq">RabbitMQ</a>
 		</div>
 
 		<script src="//code.jquery.com/jquery-3.1.1.min.js" integrity="sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8=" crossorigin="anonymous"></script>
@@ -72,6 +73,7 @@ func main() {
 		"/memcache":  {testMemcache, envStringMust("MEMCACHE_ADDR"), envInt("MEMCACHE_NUM", 10000)},
 		"/mongodb":   {testMongoDB, envStringMust("MONGODB_URL"), envInt("MONGODB_NUM", 10000)},
 		"/cassandra": {testCassandra, envStringMust("CASSANDRA_URL"), envInt("CASSANDRA_NUM", 10000)},
+		"/rabbitmq":  {testRabbitMQ, envStringMust("RABBITMQ_URL"), envInt("RABBITMQ_NUM", 10000)},
 	} {
 		s := s
 
@@ -239,6 +241,82 @@ func testCassandra(url string, num int) error {
 	//if err = sess.Query("DROP TABLE cf_monitoring").Exec(); err != nil {
 	//	return err
 	//}
+
+	return nil
+}
+
+func testRabbitMQ(addr string, num int) error {
+	conn, err := amqp.Dial("amqp://" + addr)
+	if err != nil {
+		return err
+	}
+
+	errCh := make(chan error, 2)
+
+	// send
+	go func() {
+		ch, err := conn.Channel()
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		q, err := ch.QueueDeclare("cf_monitoring", false, true, false, false, nil)
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		for i := 0; i < num; i++ {
+			err = ch.Publish("", q.Name, false, false, amqp.Publishing{
+				ContentType: "text/plain",
+				Body:        []byte{},
+			})
+
+			if err != nil {
+				errCh <- err
+				return
+			}
+		}
+
+		errCh <- nil
+	}()
+
+	// recv
+	go func(num int) {
+		ch, err := conn.Channel()
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		q, err := ch.QueueDeclare("cf_monitoring", false, true, false, false, nil)
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		for range msgs {
+			num--
+			if num == 0 {
+				errCh <- nil
+				return
+			}
+		}
+	}(num)
+
+	for i := 0; i < 2; i++ {
+		err = <- errCh
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }

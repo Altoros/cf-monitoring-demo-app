@@ -1,5 +1,5 @@
 {
-    "memo": "119b8bb43052e648e086a7721364aca611de4b0fde8c4dcc3179fbe9fc8922d3",
+    "memo": "76931f7b2b62412ebba2e7c3ad4eddde53591faacdbd06b36d179f36cbf13be4",
     "projects": [
         {
             "name": "github.com/bradfitz/gomemcache",
@@ -53,6 +53,14 @@
             "name": "github.com/lib/pq",
             "branch": "master",
             "revision": "ba5d4f7a35561e22fbdf7a39aa0070f4d460cfc0",
+            "packages": [
+                "."
+            ]
+        },
+        {
+            "name": "github.com/streadway/amqp",
+            "branch": "master",
+            "revision": "d75c3a341ff43309ad0cb69ac8bdbd1d8772775f",
             "packages": [
                 "."
             ]

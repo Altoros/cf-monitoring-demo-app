@@ -15,6 +15,9 @@
         "github.com/lib/pq": {
             "branch": "master"
         },
+        "github.com/streadway/amqp": {
+            "branch": "master"
+        },
         "gopkg.in/mgo.v2": {
             "branch": "v2"
         }
