@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"unsafe"
 
+	"strings"
+
 	"github.com/bradfitz/gomemcache/memcache"
 	"github.com/garyburd/redigo/redis"
 	_ "github.com/go-sql-driver/mysql"
@@ -69,7 +71,7 @@ func main() {
 		"/redis":     {testRedis, envStringMust("REDIS_URL"), envInt("REDIS_NUM", 10000)},
 		"/memcache":  {testMemcache, envStringMust("MEMCACHE_ADDR"), envInt("MEMCACHE_NUM", 10000)},
 		"/mongodb":   {testMongoDB, envStringMust("MONGODB_URL"), envInt("MONGODB_NUM", 10000)},
-		"/cassandra": {testCassandra, envStringMust("CASSANDRA_HOST"), envInt("CASSANDRA_NUM", 10000)},
+		"/cassandra": {testCassandra, envStringMust("CASSANDRA_URL"), envInt("CASSANDRA_NUM", 10000)},
 	} {
 		s := s
 
@@ -209,8 +211,14 @@ func testMongoDB(url string, num int) error {
 	return c.DropCollection()
 }
 
-func testCassandra(host string, num int) error {
-	cfg := gocql.NewCluster(host)
+func testCassandra(url string, num int) error {
+	chunks := strings.SplitN(url, "/", 2)
+	hosts := strings.Split(chunks[0], ",")
+
+	cfg := gocql.NewCluster(hosts...)
+	if len(chunks) == 2 {
+		cfg.Keyspace = chunks[1]
+	}
 
 	sess, err := cfg.CreateSession()
 	if err != nil {
@@ -218,19 +226,19 @@ func testCassandra(host string, num int) error {
 	}
 	defer sess.Close()
 
-	if err := sess.Query("CREATE TABLE IF NOT EXISTS cf_monitoring (i INT)").Exec(); err != nil {
+	if err = sess.Query("CREATE TABLE IF NOT EXISTS cf_monitoring (id int PRIMARY KEY)").Exec(); err != nil {
 		return err
 	}
 
 	for i := 0; i < num; i++ {
-		if err = sess.Query("INSERT INTO cf_monitoring VALUES (?)", i).Exec(); err != nil {
+		if err = sess.Query("INSERT INTO cf_monitoring (id) VALUES (?)", i).Exec(); err != nil {
 			return err
 		}
 	}
 
-	if err = sess.Query("DROP TABLE cf_monitoring").Exec(); err != nil {
-		return err
-	}
+	//if err = sess.Query("DROP TABLE cf_monitoring").Exec(); err != nil {
+	//	return err
+	//}
 
 	return nil
 }
