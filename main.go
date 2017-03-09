@@ -4,10 +4,12 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"html/template"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/bradfitz/gomemcache/memcache"
@@ -19,7 +21,7 @@ import (
 	"gopkg.in/mgo.v2"
 )
 
-var indexHTML = []byte(`
+var indexTemplate = `
 <!DOCTYPE html>
 <html>
 	<head>
@@ -36,22 +38,30 @@ var indexHTML = []byte(`
 		</nav>
 
 		<div class="container" >
-			<a class="btn btn-primary" href="/mysql">MySQL</a>
-			<a class="btn btn-success" href="/pgsql">PostgreSQL</a>
-			<a class="btn btn-danger" href="/redis">Redis</a>
-			<a class="btn btn-info" href="/memcache">Memcache</a>
-			<a class="btn btn-warning" href="/mongodb">MongoDB</a>
-			<a class="btn btn-default" href="/cassandra">Cassandra</a>
-			<a class="btn btn-default" href="/rabbitmq">RabbitMQ</a>
+			<a class="btn btn-primary {{ if index . "mysql" }}disabled{{ end }}" href="/mysql">MySQL</a>
+			<a class="btn btn-success {{ if index . "pgsql" }}disabled{{ end }}" href="/pgsql">PostgreSQL</a>
+			<a class="btn btn-danger {{ if index . "redis" }}disabled{{ end }}" href="/redis">Redis</a>
+			<a class="btn btn-info {{ if index . "memcache" }}disabled{{ end }}" href="/memcache">Memcache</a>
+			<a class="btn btn-warning {{ if index . "mongodb" }}disabled{{ end }}" href="/mongodb">MongoDB</a>
+			<a class="btn btn-default {{ if index . "cassandra" }}disabled{{ end }}" href="/cassandra">Cassandra</a>
+			<a class="btn btn-default {{ if index . "rabbitmq" }}disabled{{ end }}" href="/rabbitmq">RabbitMQ</a>
 		</div>
 
 		<script src="//code.jquery.com/jquery-3.1.1.min.js" integrity="sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8=" crossorigin="anonymous"></script>
 		<script src="//maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js" integrity="sha256-U5ZEeKfGNOja007MMD3YBI0A3OSZOQbeG6z2f2Y0hu8=" crossorigin="anonymous"></script>
 	</body>
 </html>
-`)
+`
+
+var mu = sync.Mutex{}
+var ss = map[string]bool{}
 
 func main() {
+	tpl, err := template.New("index").Parse(indexTemplate)
+	if err != nil {
+		panic(err)
+	}
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
@@ -59,7 +69,9 @@ func main() {
 		}
 
 		w.WriteHeader(http.StatusOK)
-		w.Write(indexHTML)
+		if err := tpl.ExecuteTemplate(w, "index", ss); err != nil {
+			panic(err)
+		}
 	})
 
 	for path, s := range map[string]*struct {
@@ -67,21 +79,39 @@ func main() {
 		addr string
 		num  int
 	}{
-		"/mysql":     {testMySQL, envStringMust("MYSQL_URL"), envInt("MYSQL_NUM", 1000)},
-		"/pgsql":     {testPGSQL, envStringMust("PGSQL_URL"), envInt("PGSQL_NUM", 1000)},
-		"/redis":     {testRedis, envStringMust("REDIS_URL"), envInt("REDIS_NUM", 10000)},
-		"/memcache":  {testMemcache, envStringMust("MEMCACHE_ADDR"), envInt("MEMCACHE_NUM", 10000)},
-		"/mongodb":   {testMongoDB, envStringMust("MONGODB_URL"), envInt("MONGODB_NUM", 10000)},
-		"/cassandra": {testCassandra, envStringMust("CASSANDRA_URL"), envInt("CASSANDRA_NUM", 10000)},
-		"/rabbitmq":  {testRabbitMQ, envStringMust("RABBITMQ_URL"), envInt("RABBITMQ_NUM", 10000)},
+		"mysql":     {testMySQL, envStringMust("MYSQL_URL"), envInt("MYSQL_NUM", 1000)},
+		"pgsql":     {testPGSQL, envStringMust("PGSQL_URL"), envInt("PGSQL_NUM", 1000)},
+		"redis":     {testRedis, envStringMust("REDIS_URL"), envInt("REDIS_NUM", 10000)},
+		"memcache":  {testMemcache, envStringMust("MEMCACHE_ADDR"), envInt("MEMCACHE_NUM", 10000)},
+		"mongodb":   {testMongoDB, envStringMust("MONGODB_URL"), envInt("MONGODB_NUM", 10000)},
+		"cassandra": {testCassandra, envStringMust("CASSANDRA_URL"), envInt("CASSANDRA_NUM", 10000)},
+		"rabbitmq":  {testRabbitMQ, envStringMust("RABBITMQ_URL"), envInt("RABBITMQ_NUM", 10000)},
 	} {
 		s := s
+		path := path
 
-		http.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-			if err := s.fn(s.addr, s.num); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.HandleFunc("/"+path, func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			if ss[path] {
+				http.Error(w, fmt.Sprintf("%s is busy now", path), http.StatusInternalServerError)
+				mu.Unlock()
 				return
 			}
+			ss[path] = true
+			mu.Unlock()
+
+			go func() {
+				defer func() {
+					mu.Lock()
+					delete(ss, path)
+					mu.Unlock()
+				}()
+
+				if err := s.fn(s.addr, s.num); err != nil {
+					fmt.Fprintf(os.Stderr, "%s error: %v\n", path, err)
+				}
+			}()
+
 			http.Redirect(w, r, "/", http.StatusFound)
 		})
 	}
@@ -238,9 +268,9 @@ func testCassandra(url string, num int) error {
 		}
 	}
 
-	//if err = sess.Query("DROP TABLE cf_monitoring").Exec(); err != nil {
-	//	return err
-	//}
+	if err = sess.Query("DROP TABLE cf_monitoring").Exec(); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -312,7 +342,7 @@ func testRabbitMQ(addr string, num int) error {
 	}(num)
 
 	for i := 0; i < 2; i++ {
-		err = <- errCh
+		err = <-errCh
 		if err != nil {
 			return err
 		}
