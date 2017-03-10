@@ -57,6 +57,8 @@ var indexTemplate = `
 var mu = sync.Mutex{}
 var ss = map[string]bool{}
 
+type timerFunc func() bool
+
 func main() {
 	tpl, err := template.New("index").Parse(indexTemplate)
 	if err != nil {
@@ -78,7 +80,7 @@ func main() {
 	sec := envInt("LOAD_SEC", 900)
 
 	for path, s := range map[string]*struct {
-		fn   func(string, func() bool) error
+		fn   func(string, timerFunc) error
 		addr string
 	}{
 		"mysql":     {testMySQL, envStringMust("MYSQL_URL")},
@@ -151,7 +153,7 @@ func envInt(k string, d int) int {
 	return i
 }
 
-func makeTimer(sec int) func() bool {
+func makeTimer(sec int) timerFunc {
 	var stop time.Time
 
 	return func() bool {
@@ -163,15 +165,15 @@ func makeTimer(sec int) func() bool {
 	}
 }
 
-func testMySQL(url string, fn func() bool) error {
+func testMySQL(url string, fn timerFunc) error {
 	return testSQLDB("mysql", url, fn)
 }
 
-func testPGSQL(url string, fn func() bool) error {
+func testPGSQL(url string, fn timerFunc) error {
 	return testSQLDB("postgres", "postgres://"+url, fn)
 }
 
-func testSQLDB(driver, url string, fn func() bool) error {
+func testSQLDB(driver, url string, fn timerFunc) error {
 	db, err := sql.Open(driver, url)
 	if err != nil {
 		return err
@@ -195,7 +197,7 @@ func testSQLDB(driver, url string, fn func() bool) error {
 	return nil
 }
 
-func testRedis(url string, fn func() bool) error {
+func testRedis(url string, fn timerFunc) error {
 	conn, err := redis.DialURL("redis://" + url)
 	if err != nil {
 		return err
@@ -216,7 +218,7 @@ func testRedis(url string, fn func() bool) error {
 	return nil
 }
 
-func testMemcache(addr string, fn func() bool) error {
+func testMemcache(addr string, fn timerFunc) error {
 	mc := memcache.New(addr)
 
 	b := make([]byte, unsafe.Sizeof(uint64(0)))
@@ -238,7 +240,7 @@ func testMemcache(addr string, fn func() bool) error {
 	return nil
 }
 
-func testMongoDB(url string, fn func() bool) error {
+func testMongoDB(url string, fn timerFunc) error {
 	mg, err := mgo.Dial("mongodb://" + url)
 	if err != nil {
 		return err
@@ -258,7 +260,7 @@ func testMongoDB(url string, fn func() bool) error {
 	return c.DropCollection()
 }
 
-func testCassandra(url string, fn func() bool) error {
+func testCassandra(url string, fn timerFunc) error {
 	chunks := strings.SplitN(url, "/", 2)
 	hosts := strings.Split(chunks[0], ",")
 
@@ -290,76 +292,37 @@ func testCassandra(url string, fn func() bool) error {
 	return nil
 }
 
-func testRabbitMQ(addr string, fn func() bool) error {
+func testRabbitMQ(addr string, fn timerFunc) error {
 	conn, err := amqp.Dial("amqp://" + addr)
 	if err != nil {
 		return err
 	}
 
-	errCh := make(chan error, 2)
-	doneCh := make(chan struct{})
-	readCh := make(chan bool)
-
-	// send
-	go func() {
-		defer close(readCh)
-
-		ch, err := conn.Channel()
-		if err != nil {
-			errCh <- err
-			return
-		}
-
-		q, err := ch.QueueDeclare("cf_monitoring", false, true, false, false, nil)
-		if err != nil {
-			errCh <- err
-			return
-		}
-
-		for i := 0; fn(); i++ {
-			err = ch.Publish("", q.Name, false, false, amqp.Publishing{
-				ContentType: "text/plain",
-				Body:        []byte{},
-			})
-
-			if err != nil {
-				errCh <- err
-				return
-			}
-
-			readCh<-true
-		}
-	}()
-
-	// recv
-	go func() {
-		defer close(doneCh)
-
-		ch, err := conn.Channel()
-		if err != nil {
-			errCh <- err
-			return
-		}
-
-		q, err := ch.QueueDeclare("cf_monitoring", false, true, false, false, nil)
-		if err != nil {
-			errCh <- err
-			return
-		}
-
-		for range readCh {
-			_, err := ch.Consume(q.Name, "", true, false, false, false, nil)
-			if err != nil {
-				errCh <- err
-				return
-			}
-		}
-	}()
-
-	select {
-	case err := <- errCh:
+	ch, err := conn.Channel()
+	if err != nil {
 		return err
-	case <-doneCh:
-		return nil
 	}
+
+	q, err := ch.QueueDeclare("cf_monitoring", false, true, false, false, nil)
+	if err != nil {
+		return err
+	}
+
+	for i := 0; fn(); i++ {
+		err = ch.Publish("", q.Name, false, false, amqp.Publishing{
+			ContentType: "text/plain",
+			Body:        []byte(strconv.Itoa(i)),
+		})
+
+		if err != nil {
+			return err
+		}
+
+		_, err = ch.Consume(q.Name, "", true, false, false, false, nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
