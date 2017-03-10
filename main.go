@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/bradfitz/gomemcache/memcache"
@@ -107,9 +108,11 @@ func main() {
 					mu.Unlock()
 				}()
 
+				now := time.Now()
 				if err := s.fn(s.addr, s.num); err != nil {
 					fmt.Fprintf(os.Stderr, "%s error: %v\n", path, err)
 				}
+				fmt.Printf("%s %d ops took=%s", path, s.num, time.Since(now).String())
 			}()
 
 			http.Redirect(w, r, "/", http.StatusFound)
