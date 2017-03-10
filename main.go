@@ -75,18 +75,19 @@ func main() {
 		}
 	})
 
+	sec := envInt("LOAD_SEC", 900)
+
 	for path, s := range map[string]*struct {
-		fn   func(string, int) error
+		fn   func(string, func() bool) error
 		addr string
-		num  int
 	}{
-		"mysql":     {testMySQL, envStringMust("MYSQL_URL"), envInt("MYSQL_NUM", 1000)},
-		"pgsql":     {testPGSQL, envStringMust("PGSQL_URL"), envInt("PGSQL_NUM", 1000)},
-		"redis":     {testRedis, envStringMust("REDIS_URL"), envInt("REDIS_NUM", 10000)},
-		"memcache":  {testMemcache, envStringMust("MEMCACHE_ADDR"), envInt("MEMCACHE_NUM", 10000)},
-		"mongodb":   {testMongoDB, envStringMust("MONGODB_URL"), envInt("MONGODB_NUM", 10000)},
-		"cassandra": {testCassandra, envStringMust("CASSANDRA_URL"), envInt("CASSANDRA_NUM", 10000)},
-		"rabbitmq":  {testRabbitMQ, envStringMust("RABBITMQ_URL"), envInt("RABBITMQ_NUM", 10000)},
+		"mysql":     {testMySQL, envStringMust("MYSQL_URL")},
+		"pgsql":     {testPGSQL, envStringMust("PGSQL_URL")},
+		"redis":     {testRedis, envStringMust("REDIS_URL")},
+		"memcache":  {testMemcache, envStringMust("MEMCACHE_ADDR")},
+		"mongodb":   {testMongoDB, envStringMust("MONGODB_URL")},
+		"cassandra": {testCassandra, envStringMust("CASSANDRA_URL")},
+		"rabbitmq":  {testRabbitMQ, envStringMust("RABBITMQ_URL")},
 	} {
 		s := s
 		path := path
@@ -108,11 +109,10 @@ func main() {
 					mu.Unlock()
 				}()
 
-				now := time.Now()
-				if err := s.fn(s.addr, s.num); err != nil {
+				if err := s.fn(s.addr, makeTimer(sec)); err != nil {
 					fmt.Fprintf(os.Stderr, "%s error: %v\n", path, err)
 				}
-				fmt.Printf("%s %d ops took=%s", path, s.num, time.Since(now).String())
+				fmt.Printf("%s %dsec done\n", path, sec)
 			}()
 
 			http.Redirect(w, r, "/", http.StatusFound)
@@ -151,15 +151,27 @@ func envInt(k string, d int) int {
 	return i
 }
 
-func testMySQL(url string, num int) error {
-	return testSQLDB("mysql", url, num)
+func makeTimer(sec int) func() bool {
+	var stop time.Time
+
+	return func() bool {
+		if stop.IsZero() {
+			stop = time.Now().Add(time.Second * time.Duration(sec))
+		}
+
+		return time.Now().Before(stop)
+	}
 }
 
-func testPGSQL(url string, num int) error {
-	return testSQLDB("postgres", "postgres://"+url, num)
+func testMySQL(url string, fn func() bool) error {
+	return testSQLDB("mysql", url, fn)
 }
 
-func testSQLDB(driver, url string, num int) error {
+func testPGSQL(url string, fn func() bool) error {
+	return testSQLDB("postgres", "postgres://"+url, fn)
+}
+
+func testSQLDB(driver, url string, fn func() bool) error {
 	db, err := sql.Open(driver, url)
 	if err != nil {
 		return err
@@ -170,7 +182,7 @@ func testSQLDB(driver, url string, num int) error {
 		return err
 	}
 
-	for i := 0; i < num; i++ {
+	for i := 0; fn(); i++ {
 		if _, err = db.Exec("INSERT INTO cf_monitoring VALUES (1)"); err != nil {
 			return err
 		}
@@ -183,14 +195,14 @@ func testSQLDB(driver, url string, num int) error {
 	return nil
 }
 
-func testRedis(url string, num int) error {
+func testRedis(url string, fn func() bool) error {
 	conn, err := redis.DialURL("redis://" + url)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
-	for i := 0; i < num; i++ {
+	for i := 0; fn(); i++ {
 		key := "cf_monitoring-" + strconv.Itoa(i)
 
 		if _, err := conn.Do("SET", key, i); err != nil {
@@ -204,11 +216,11 @@ func testRedis(url string, num int) error {
 	return nil
 }
 
-func testMemcache(addr string, num int) error {
+func testMemcache(addr string, fn func() bool) error {
 	mc := memcache.New(addr)
 
 	b := make([]byte, unsafe.Sizeof(uint64(0)))
-	for i := 0; i < num; i++ {
+	for i := 0; fn(); i++ {
 		binary.LittleEndian.PutUint64(b, uint64(i))
 
 		if err := mc.Set(&memcache.Item{
@@ -226,7 +238,7 @@ func testMemcache(addr string, num int) error {
 	return nil
 }
 
-func testMongoDB(url string, num int) error {
+func testMongoDB(url string, fn func() bool) error {
 	mg, err := mgo.Dial("mongodb://" + url)
 	if err != nil {
 		return err
@@ -235,7 +247,7 @@ func testMongoDB(url string, num int) error {
 
 	c := mg.DB("").C("demo")
 
-	for i := 0; i < num; i++ {
+	for i := 0; fn(); i++ {
 		if err = c.Insert(struct {
 			I int
 		}{i}); err != nil {
@@ -246,7 +258,7 @@ func testMongoDB(url string, num int) error {
 	return c.DropCollection()
 }
 
-func testCassandra(url string, num int) error {
+func testCassandra(url string, fn func() bool) error {
 	chunks := strings.SplitN(url, "/", 2)
 	hosts := strings.Split(chunks[0], ",")
 
@@ -265,7 +277,7 @@ func testCassandra(url string, num int) error {
 		return err
 	}
 
-	for i := 0; i < num; i++ {
+	for i := 0; fn(); i++ {
 		if err = sess.Query("INSERT INTO cf_monitoring (id) VALUES (?)", i).Exec(); err != nil {
 			return err
 		}
@@ -278,16 +290,20 @@ func testCassandra(url string, num int) error {
 	return nil
 }
 
-func testRabbitMQ(addr string, num int) error {
+func testRabbitMQ(addr string, fn func() bool) error {
 	conn, err := amqp.Dial("amqp://" + addr)
 	if err != nil {
 		return err
 	}
 
 	errCh := make(chan error, 2)
+	doneCh := make(chan struct{})
+	readCh := make(chan bool)
 
 	// send
 	go func() {
+		defer close(readCh)
+
 		ch, err := conn.Channel()
 		if err != nil {
 			errCh <- err
@@ -300,7 +316,7 @@ func testRabbitMQ(addr string, num int) error {
 			return
 		}
 
-		for i := 0; i < num; i++ {
+		for i := 0; fn(); i++ {
 			err = ch.Publish("", q.Name, false, false, amqp.Publishing{
 				ContentType: "text/plain",
 				Body:        []byte{},
@@ -310,13 +326,15 @@ func testRabbitMQ(addr string, num int) error {
 				errCh <- err
 				return
 			}
-		}
 
-		errCh <- nil
+			readCh<-true
+		}
 	}()
 
 	// recv
-	go func(num int) {
+	go func() {
+		defer close(doneCh)
+
 		ch, err := conn.Channel()
 		if err != nil {
 			errCh <- err
@@ -329,27 +347,19 @@ func testRabbitMQ(addr string, num int) error {
 			return
 		}
 
-		msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
-		if err != nil {
-			errCh <- err
-			return
-		}
-
-		for range msgs {
-			num--
-			if num == 0 {
-				errCh <- nil
+		for range readCh {
+			_, err := ch.Consume(q.Name, "", true, false, false, false, nil)
+			if err != nil {
+				errCh <- err
 				return
 			}
 		}
-	}(num)
+	}()
 
-	for i := 0; i < 2; i++ {
-		err = <-errCh
-		if err != nil {
-			return err
-		}
+	select {
+	case err := <- errCh:
+		return err
+	case <-doneCh:
+		return nil
 	}
-
-	return nil
 }
