@@ -1,0 +1,12 @@
+applications:
+- name: cf-monitoring-demo-app
+  command: cf-monitoring-demo-app
+  env:
+    GOPACKAGENAME: cf-monitoring-demo-app
+    CASSANDRA_URL: 192.168.4.50/cf_monitoring
+    MEMCACHE_ADDR: 192.168.2.20:11211
+    MONGODB_URL: mongoadmin:FKfUrR25PZMf2PaTPbr0mZP@192.168.4.100:27017/cf_monitoring
+    MYSQL_URL: stressuser:Queesaichu5eiy3baeRi@tcp(192.168.4.12:3306)/stress_db
+    PGSQL_URL: diego:kuaB9goongah@192.168.1.36:5524/diego?sslmode=disable
+    RABBITMQ_URL: broker:kuaB9goongah@192.168.4.40:5672
+    REDIS_URL: :907e37c2-d22f-4d06-8e59-bc94953dc83f@192.168.1.110:38856/0
