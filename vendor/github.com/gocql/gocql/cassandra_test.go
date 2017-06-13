@@ -4,6 +4,7 @@ package gocql
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"math"
 	"math/big"
@@ -15,8 +16,6 @@ import (
 	"testing"
 	"time"
 	"unicode"
-
-	"golang.org/x/net/context"
 
 	"gopkg.in/inf.v0"
 )
@@ -171,6 +170,16 @@ func TestTracing(t *testing.T) {
 	} else if value != 42 {
 		t.Fatalf("value: expected %d, got %d", 42, value)
 	} else if buf.Len() == 0 {
+		t.Fatal("select: failed to obtain any tracing")
+	}
+
+	// also works from session tracer
+	session.SetTrace(trace)
+	buf.Reset()
+	if err := session.Query(`SELECT id FROM trace WHERE id = ?`, 42).Scan(&value); err != nil {
+		t.Fatal("select:", err)
+	}
+	if buf.Len() == 0 {
 		t.Fatal("select: failed to obtain any tracing")
 	}
 }
@@ -1718,7 +1727,7 @@ func TestGetTableMetadata(t *testing.T) {
 			t.Errorf("Expected table name to be set, but it was empty: index=%d metadata=%+v", i, table)
 		}
 		if table.Keyspace != "gocql_test" {
-			t.Errorf("Expected keyspace for '%d' table metadata to be 'gocql_test' but was '%s'", table.Name, table.Keyspace)
+			t.Errorf("Expected keyspace for '%s' table metadata to be 'gocql_test' but was '%s'", table.Name, table.Keyspace)
 		}
 		if *flagProto < 4 {
 			// TODO(zariel): there has to be a better way to detect what metadata version
@@ -1756,7 +1765,7 @@ func TestGetTableMetadata(t *testing.T) {
 	if testTable == nil {
 		t.Fatal("Expected table metadata for name 'test_table_metadata'")
 	}
-	if *flagProto < protoVersion4 {
+	if *flagProto == protoVersion1 {
 		if testTable.KeyValidator != "org.apache.cassandra.db.marshal.Int32Type" {
 			t.Errorf("Expected test_table_metadata key validator to be 'org.apache.cassandra.db.marshal.Int32Type' but was '%s'", testTable.KeyValidator)
 		}
@@ -2155,7 +2164,7 @@ func TestManualQueryPaging(t *testing.T) {
 	var id, count, fetched int
 
 	iter := query.Iter()
-	// NOTE: this isnt very indicitive of how it should be used, the idea is that
+	// NOTE: this isnt very indicative of how it should be used, the idea is that
 	// the page state is returned to some client who will send it back to manually
 	// page through the results.
 	for {
@@ -2575,5 +2584,76 @@ func TestControl_DiscoverProtocol(t *testing.T) {
 
 	if session.cfg.ProtoVersion == 0 {
 		t.Fatal("did not discovery protocol")
+	}
+}
+
+// TestUnsetCol verify unset column will not replace an existing column
+func TestUnsetCol(t *testing.T) {
+	if *flagProto < 4 {
+		t.Skip("Unset Values are not supported in protocol < 4")
+	}
+	session := createSession(t)
+	defer session.Close()
+
+	if err := createTable(session, "CREATE TABLE gocql_test.testUnsetInsert (id int, my_int int, my_text text, PRIMARY KEY (id))"); err != nil {
+		t.Fatalf("failed to create table with error '%v'", err)
+	}
+	if err := session.Query("INSERT INTO testUnSetInsert (id,my_int,my_text) VALUES (?,?,?)", 1, 2, "3").Exec(); err != nil {
+		t.Fatalf("failed to insert with err: %v", err)
+	}
+	if err := session.Query("INSERT INTO testUnSetInsert (id,my_int,my_text) VALUES (?,?,?)", 1, UnsetValue, UnsetValue).Exec(); err != nil {
+		t.Fatalf("failed to insert with err: %v", err)
+	}
+
+	var id, mInt int
+	var mText string
+
+	if err := session.Query("SELECT id, my_int ,my_text FROM testUnsetInsert").Scan(&id, &mInt, &mText); err != nil {
+		t.Fatalf("failed to select with err: %v", err)
+	} else if id != 1 || mInt != 2 || mText != "3" {
+		t.Fatalf("Expected results: 1, 2, \"3\", got %v, %v, %v", id, mInt, mText)
+	}
+}
+
+// TestUnsetColBatch verify unset column will not replace a column in batch
+func TestUnsetColBatch(t *testing.T) {
+	if *flagProto < 4 {
+		t.Skip("Unset Values are not supported in protocol < 4")
+	}
+	session := createSession(t)
+	defer session.Close()
+
+	if err := createTable(session, "CREATE TABLE gocql_test.batchUnsetInsert (id int, my_int int, my_text text, PRIMARY KEY (id))"); err != nil {
+		t.Fatalf("failed to create table with error '%v'", err)
+	}
+
+	b := session.NewBatch(LoggedBatch)
+	b.Query("INSERT INTO gocql_test.batchUnsetInsert(id, my_int, my_text) VALUES (?,?,?)", 1, 1, UnsetValue)
+	b.Query("INSERT INTO gocql_test.batchUnsetInsert(id, my_int, my_text) VALUES (?,?,?)", 1, UnsetValue, "")
+	b.Query("INSERT INTO gocql_test.batchUnsetInsert(id, my_int, my_text) VALUES (?,?,?)", 2, 2, UnsetValue)
+
+	if err := session.ExecuteBatch(b); err != nil {
+		t.Fatalf("query failed. %v", err)
+	} else {
+		if b.Attempts() < 1 {
+			t.Fatal("expected at least 1 attempt, but got 0")
+		}
+		if b.Latency() <= 0 {
+			t.Fatalf("expected latency to be greater than 0, but got %v instead.", b.Latency())
+		}
+	}
+	var id, mInt, count int
+	var mText string
+
+	if err := session.Query("SELECT count(*) FROM gocql_test.batchUnsetInsert;").Scan(&count); err != nil {
+		t.Fatalf("Failed to select with err: %v", err)
+	} else if count != 2 {
+		t.Fatalf("Expected Batch Insert count 2, got %v", count)
+	}
+
+	if err := session.Query("SELECT id, my_int ,my_text FROM gocql_test.batchUnsetInsert where id=1;").Scan(&id, &mInt, &mText); err != nil {
+		t.Fatalf("failed to select with err: %v", err)
+	} else if id != mInt {
+		t.Fatalf("expected id, my_int to be 1, got %v and %v", id, mInt)
 	}
 }

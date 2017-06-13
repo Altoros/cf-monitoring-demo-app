@@ -133,7 +133,7 @@ func main() {
 func envStringMust(k string) string {
 	v := os.Getenv(k)
 	if v == "" {
-		fmt.Fprintf(os.Stderr, "$%s is required", k)
+		fmt.Fprintf(os.Stderr, "$%s is required\n", k)
 		os.Exit(1)
 	}
 	return v
@@ -303,13 +303,17 @@ func testRabbitMQ(addr string, fn timerFunc) error {
 		return err
 	}
 
-	q, err := ch.QueueDeclare("cf_monitoring", false, true, false, false, nil)
+	if err = ch.ExchangeDeclare("cf_monitoring", "direct", false, true, false, false, nil); err != nil {
+		return err
+	}
+
+	q, err := ch.QueueDeclare("cf_monitoring-q", false, false, true, false, nil)
 	if err != nil {
 		return err
 	}
 
 	for i := 0; fn(); i++ {
-		err = ch.Publish("", q.Name, false, false, amqp.Publishing{
+		err = ch.Publish("cf_monitoring", "", false, false, amqp.Publishing{
 			ContentType: "text/plain",
 			Body:        []byte(strconv.Itoa(i)),
 		})
